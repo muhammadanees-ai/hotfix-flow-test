@@ -1,13 +1,17 @@
 # Rule: hotfix-branch-name-check
 #
-# Purpose: only branches that reference a hotfix JIRA ticket may be merged
-# into master. This workflow runs on every pull request targeting master
-# and fails (blocking the merge, once set as a required status check in
-# branch protection) if the source branch name doesn't match the pattern.
+# Purpose: only branches that reference a hotfix JIRA ticket (or the staging
+# release branch) may be merged into master. This workflow runs on every
+# pull request targeting master and fails (blocking the merge, once set as
+# a required status check in branch protection) if the source branch name
+# doesn't match the pattern.
 #
 # Accepted branch name examples:
 #   hotfix/HotFix-PROD-1234
 #   HotFix-PROD-1234
+#   staging   ← the normal release branch is always allowed through; this
+#               check only exists to gate ad-hoc/hotfix branches, not the
+#               regular staging → master release flow.
 #
 # To add another rule later (e.g. "ticket must exist and be In Progress in
 # JIRA", "changelog entry required"), copy this file as a new workflow under
@@ -40,10 +44,12 @@ jobs:
 
           echo "Source branch: $HEAD_REF"
 
-          if [[ "$HEAD_REF" =~ $PATTERN ]]; then
+          if [[ "$HEAD_REF" == "staging" ]]; then
+            echo "✅ '$HEAD_REF' is the staging release branch — exempt from the hotfix naming rule by design."
+          elif [[ "$HEAD_REF" =~ $PATTERN ]]; then
             echo "✅ Branch name '$HEAD_REF' matches the required hotfix naming convention."
           else
             echo "❌ Branch '$HEAD_REF' does not match the required hotfix naming convention."
-            echo "Expected something like: hotfix/HotFix-PROD-1234 (referencing a JIRA hotfix ticket)."
+            echo "Expected something like: hotfix/HotFix-PROD-1234 (referencing a JIRA hotfix ticket), or 'staging' for a normal release."
             exit 1
           fi
