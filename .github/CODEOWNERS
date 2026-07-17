@@ -12,4 +12,4 @@
 # Pattern "*" = applies repo-wide. Narrow it to specific paths if you only
 # want this reviewer pool gating certain folders.
 
-* @arslantabassum
+* @arslantabassum @M . Bilal Aslam
