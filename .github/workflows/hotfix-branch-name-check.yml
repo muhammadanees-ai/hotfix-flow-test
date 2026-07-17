@@ -1,0 +1,49 @@
+# Rule: hotfix-branch-name-check
+#
+# Purpose: only branches that reference a hotfix JIRA ticket may be merged
+# into master. This workflow runs on every pull request targeting master
+# and fails (blocking the merge, once set as a required status check in
+# branch protection) if the source branch name doesn't match the pattern.
+#
+# Accepted branch name examples:
+#   hotfix/HotFix-PROD-1234
+#   HotFix-PROD-1234
+#
+# To add another rule later (e.g. "ticket must exist and be In Progress in
+# JIRA", "changelog entry required"), copy this file as a new workflow under
+# .github/workflows/, give it a distinct job name, and add that job name as
+# an additional required status check in branch protection. Keeping each
+# rule in its own workflow file keeps them independently testable and easy
+# to enable/disable.
+
+name: Hotfix Branch Name Check
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  check-branch-name:
+    name: check-branch-name
+    runs-on: ubuntu-latest
+    # Only enforce this rule for PRs actually targeting master
+    if: github.event.pull_request.base.ref == 'master'
+    steps:
+      - name: Validate branch name against hotfix ticket pattern
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # Optional "hotfix/" prefix, then HotFix-<JIRA PROJECT KEY>-<number>
+          # e.g. hotfix/HotFix-PROD-1234  or  HotFix-PROD-1234
+          PATTERN='^(hotfix/)?[Hh]ot[Ff]ix-[A-Za-z][A-Za-z0-9]*-[0-9]+$'
+
+          echo "Source branch: $HEAD_REF"
+
+          if [[ "$HEAD_REF" =~ $PATTERN ]]; then
+            echo "✅ Branch name '$HEAD_REF' matches the required hotfix naming convention."
+          else
+            echo "❌ Branch '$HEAD_REF' does not match the required hotfix naming convention."
+            echo "Expected something like: hotfix/HotFix-PROD-1234 (referencing a JIRA hotfix ticket)."
+            exit 1
+          fi
