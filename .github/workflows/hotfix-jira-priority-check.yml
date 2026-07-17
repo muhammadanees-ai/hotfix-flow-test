@@ -30,11 +30,21 @@
 #     (create one at https://id.atlassian.com/manage-profile/security/api-tokens)
 #
 # Jira domain and account email are hardcoded below (not secrets, since
-# they're not sensitive on their own) — only the API token is a secret.
+# they're not sensitive on their own) - only the API token is a secret.
 #
 # If the custom field ID (customfield_10795) or the priority option values
 # (P1/P2/P3) ever change in Jira, update the JIRA_PRIORITY_FIELD env var and
 # the comparison below to match.
+#
+# Second job, hotfix-merge-approval: restricts WHO can actually clear a
+# hotfix PR to merge, on top of the Jira/priority checks above. It runs
+# after check-jira-priority passes and targets the 'hotfix-merge-approval'
+# GitHub Environment (Settings -> Environments), which has bilal-magento
+# configured as its required reviewer. The job pauses until bilal-magento
+# approves it from the Actions run page ("Review deployments"), then
+# succeeds. Exempt for the staging -> master release branch, same as
+# check-jira-priority. Add "hotfix-merge-approval" as a required status
+# check in branch protection for this to actually block merging.
 name: Hotfix Jira Priority Check
 on:
   pull_request:
@@ -59,7 +69,7 @@ jobs:
         id: exempt
         run: |
           if [[ "$HEAD_REF" == "staging" ]]; then
-            echo "✅ '$HEAD_REF' is the staging release branch — exempt from the Jira priority check by design."
+            echo "'staging' is the staging release branch - exempt from the Jira priority check by design."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -73,11 +83,11 @@ jobs:
           # Looks for PROD-<number> anywhere in the title, e.g. "PROD-4821" or "[PROD-4821]"
           TICKET=$(grep -oE '[Pp][Rr][Oo][Dd]-[0-9]+' <<< "$PR_TITLE" | head -n1 | tr '[:lower:]' '[:upper:]')
           if [[ -z "$TICKET" ]]; then
-            echo "❌ No PROD-<number> ticket reference found in the PR title."
+            echo "No PROD-<number> ticket reference found in the PR title."
             echo "Expected something like: 'Hotfix: fix checkout crash (PROD-4821)'"
             exit 1
           fi
-          echo "✅ Found ticket reference: $TICKET"
+          echo "Found ticket reference: $TICKET"
           echo "key=$TICKET" >> "$GITHUB_OUTPUT"
 
       - name: Check Jira priority and label
@@ -86,7 +96,7 @@ jobs:
           TICKET_KEY: ${{ steps.ticket.outputs.key }}
         run: |
           if [[ -z "$JIRA_API_TOKEN" ]]; then
-            echo "❌ Missing JIRA_API_TOKEN repo secret - cannot verify $TICKET_KEY."
+            echo "Missing JIRA_API_TOKEN repo secret - cannot verify $TICKET_KEY."
             exit 1
           fi
 
@@ -96,7 +106,7 @@ jobs:
             "$JIRA_BASE_URL/rest/api/3/issue/$TICKET_KEY?fields=$JIRA_PRIORITY_FIELD,labels")
 
           if [[ "$HTTP_STATUS" != "200" ]]; then
-            echo "❌ Could not fetch $TICKET_KEY from Jira (HTTP $HTTP_STATUS). Check the ticket key and Jira credentials."
+            echo "Could not fetch $TICKET_KEY from Jira (HTTP $HTTP_STATUS). Check the ticket key and Jira credentials."
             cat response.json || true
             exit 1
           fi
@@ -109,13 +119,29 @@ jobs:
           echo "Has 'hotfix' label: $HAS_HOTFIX_LABEL"
 
           if [[ "$PRIORITY" != "P1" ]]; then
-            echo "❌ $TICKET_KEY is not P1 (Request Prioirty = '${PRIORITY:-<none>}')."
+            echo "$TICKET_KEY is not P1 (Request Prioirty = '${PRIORITY:-<none>}')."
             exit 1
           fi
 
           if [[ "$HAS_HOTFIX_LABEL" != "true" ]]; then
-            echo "❌ $TICKET_KEY does not have the 'hotfix' label."
+            echo "$TICKET_KEY does not have the 'hotfix' label."
             exit 1
           fi
 
-          echo "✅ $TICKET_KEY is P1 and labelled 'hotfix' - hotfix check passed."
+          echo "$TICKET_KEY is P1 and labelled 'hotfix' - hotfix check passed."
+
+  # Gate: only bilal-magento (via the 'hotfix-merge-approval' environment's
+  # required reviewer) can clear a hotfix PR to merge into master. Regular
+  # staging -> master releases are exempt, same as check-jira-priority above.
+  # When this repo moves to a GitHub org, swap the required reviewer on the
+  # 'hotfix-merge-approval' environment (Settings -> Environments) from the
+  # individual user to the release-managers team - no workflow change needed.
+  hotfix-merge-approval:
+    name: hotfix-merge-approval
+    needs: check-jira-priority
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'master' && github.head_ref != 'staging'
+    environment: hotfix-merge-approval
+    steps:
+      - name: Record approval
+        run: echo "Hotfix merge approved by an authorized reviewer via the hotfix-merge-approval environment."
