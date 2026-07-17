@@ -1,0 +1,15 @@
+# CODEOWNERS — hotfix reviewer gate
+#
+# Every one of the people/teams listed below is automatically requested as a
+# reviewer on pull requests. When branch protection has "Require review from
+# Code Owners" turned on with 1 required approval, an approval from ANY ONE
+# of these reviewers satisfies the requirement — you do not need all of them
+# to approve, just one.
+#
+# Replace the placeholder handles below with the 6-8 real GitHub usernames
+# (or a GitHub team, e.g. @your-org/release-approvers).
+#
+# Pattern "*" = applies repo-wide. Narrow it to specific paths if you only
+# want this reviewer pool gating certain folders.
+
+* @reviewer1 @reviewer2 @reviewer3 @reviewer4 @reviewer5 @reviewer6
