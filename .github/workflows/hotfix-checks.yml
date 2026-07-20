@@ -1,0 +1,183 @@
+# Rule: hotfix-checks
+#
+# Purpose: this single workflow enforces the full hotfix-to-master gate in
+# three stages (previously three separate workflow files, now combined):
+#
+#   1. check-branch-name    - the source branch name must reference a
+#                              hotfix ticket (e.g. hotfix/HotFix-PROD-1234
+#                              or HotFix-PROD-1234), or be the "staging"
+#                              release branch. Fully case-insensitive: the
+#                              branch name is lowercased before matching, so
+#                              hotfix / Hotfix / HotFix / HOTFIX are all
+#                              accepted in any position (prefix or word).
+#
+#   2. check-jira-priority  - the PROD-<number> ticket is looked up first in
+#                              the PR title, and if not found there, in the
+#                              branch name (case-insensitive either way).
+#                              The ticket must be P1 in Jira (the "Request
+#                              Prioirty" custom field - yes, that's really
+#                              how it's spelled in this Jira instance -
+#                              customfield_10795; the standard Jira Priority
+#                              field is not usable here, see below) and
+#                              carry the "hotfix" label (case-insensitive
+#                              label match).
+#
+#   3. hotfix-merge-approval - once both checks above pass, only an
+#                              authorized reviewer configured on the
+#                              'hotfix-merge-approval' GitHub Environment
+#                              (Settings -> Environments) can actually clear
+#                              the PR to merge.
+#
+# All three exempt the "staging" release branch, since that's the normal
+# release flow, not an ad-hoc hotfix.
+#
+# Required repo secret (Settings -> Secrets and variables -> Actions):
+#   JIRA_API_TOKEN  an API token for the Jira account below
+#     (create one at https://id.atlassian.com/manage-profile/security/api-tokens)
+#
+# Jira domain and account email are hardcoded below (not secrets, since
+# they're not sensitive on their own) - only the API token is a secret.
+#
+# NOTE: the standard Jira "Priority" field has been removed from the PROD
+# project's field configuration and is not readable via the API for PROD
+# issues. "Request Prioirty" (customfield_10795) is the field PROD tickets
+# actually carry priority on. If this field ID or its option values
+# (P1/P2/P3) ever change in Jira, update JIRA_PRIORITY_FIELD and the
+# comparison below to match.
+#
+# This job's required-status-check names are unchanged from the previous
+# three-file setup (check-branch-name, check-jira-priority,
+# hotfix-merge-approval), so no branch protection / ruleset changes are
+# needed when switching to this combined file.
+name: Hotfix Checks
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, edited]
+jobs:
+  check-branch-name:
+    name: check-branch-name
+    runs-on: ubuntu-latest
+    # Only enforce this rule for PRs actually targeting master
+    if: github.event.pull_request.base.ref == 'master'
+    steps:
+      - name: Validate branch name against hotfix ticket pattern
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # Case-insensitive: lowercase the branch name before matching, so
+          # hotfix/HotFix/Hotfix/HOTFIX etc. are all accepted.
+          # Optional "hotfix/" prefix, then hotfix-<JIRA PROJECT KEY>-<number>
+          # e.g. hotfix/HotFix-PROD-1234 or HotFix-PROD-1234
+          HEAD_REF_LOWER=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]')
+          PATTERN='^(hotfix/)?hotfix-[a-z][a-z0-9]*-[0-9]+$'
+
+          echo "Source branch: $HEAD_REF"
+
+          if [[ "$HEAD_REF_LOWER" == "staging" ]]; then
+            echo "'$HEAD_REF' is the staging release branch - exempt from the hotfix naming rule by design."
+          elif [[ "$HEAD_REF_LOWER" =~ $PATTERN ]]; then
+            echo "Branch name '$HEAD_REF' matches the required hotfix naming convention."
+          else
+            echo "Branch '$HEAD_REF' does not match the required hotfix naming convention."
+            echo "Expected something like: hotfix/HotFix-PROD-1234 (referencing a JIRA hotfix ticket), or 'staging' for a normal release."
+            exit 1
+          fi
+
+  check-jira-priority:
+    name: check-jira-priority
+    runs-on: ubuntu-latest
+    # Only enforce this rule for PRs actually targeting master
+    if: github.event.pull_request.base.ref == 'master'
+    env:
+      HEAD_REF: ${{ github.head_ref }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      JIRA_BASE_URL: https://tilemountain.atlassian.net
+      JIRA_USER_EMAIL: bilal.aslam@tilemountain.co.uk
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      # The "Request Prioirty" custom field ID in this Jira instance (misspelling is intentional - matches the real field name)
+      JIRA_PRIORITY_FIELD: customfield_10795
+    steps:
+      - name: Exempt the staging release branch
+        id: exempt
+        run: |
+          HEAD_REF_LOWER=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]')
+          if [[ "$HEAD_REF_LOWER" == "staging" ]]; then
+            echo "'$HEAD_REF' is the staging release branch - exempt from the Jira priority check by design."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract PROD ticket from PR title or branch name
+        if: steps.exempt.outputs.skip == 'false'
+        id: ticket
+        run: |
+          echo "PR title: $PR_TITLE"
+          echo "Branch name: $HEAD_REF"
+          # Case-insensitive PROD-<number> match, checked first in the PR
+          # title, then falling back to the branch name if not found there.
+          TICKET=$(grep -ioE 'prod-[0-9]+' <<< "$PR_TITLE" | head -n1 | tr '[:lower:]' '[:upper:]')
+          if [[ -z "$TICKET" ]]; then
+            TICKET=$(grep -ioE 'prod-[0-9]+' <<< "$HEAD_REF" | head -n1 | tr '[:lower:]' '[:upper:]')
+            if [[ -n "$TICKET" ]]; then
+              echo "No ticket found in the PR title - using the one found in the branch name instead."
+            fi
+          fi
+          if [[ -z "$TICKET" ]]; then
+            echo "No PROD-<number> ticket reference found in the PR title or branch name."
+            echo "Expected something like: 'Hotfix: fix checkout crash (PROD-4821)', or a branch named 'hotfix/HotFix-PROD-4821'."
+            exit 1
+          fi
+          echo "Found ticket reference: $TICKET"
+          echo "key=$TICKET" >> "$GITHUB_OUTPUT"
+
+      - name: Check Jira priority and label
+        if: steps.exempt.outputs.skip == 'false'
+        env:
+          TICKET_KEY: ${{ steps.ticket.outputs.key }}
+        run: |
+          if [[ -z "$JIRA_API_TOKEN" ]]; then
+            echo "Missing JIRA_API_TOKEN repo secret - cannot verify $TICKET_KEY."
+            exit 1
+          fi
+
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+            -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET_KEY?fields=$JIRA_PRIORITY_FIELD,labels")
+
+          if [[ "$HTTP_STATUS" != "200" ]]; then
+            echo "Could not fetch $TICKET_KEY from Jira (HTTP $HTTP_STATUS). Check the ticket key and Jira credentials."
+            cat response.json || true
+            exit 1
+          fi
+
+          PRIORITY=$(jq -r ".fields[\"$JIRA_PRIORITY_FIELD\"].value // empty" response.json)
+          HAS_HOTFIX_LABEL=$(jq -r '[.fields.labels[]? | ascii_downcase] | any(. == "hotfix")' response.json)
+
+          echo "Ticket: $TICKET_KEY"
+          echo "Request Prioirty: ${PRIORITY:-<none>}"
+          echo "Has 'hotfix' label: $HAS_HOTFIX_LABEL"
+
+          if [[ "$PRIORITY" != "P1" ]]; then
+            echo "$TICKET_KEY is not P1 (Request Prioirty = '${PRIORITY:-<none>}')."
+            exit 1
+          fi
+
+          if [[ "$HAS_HOTFIX_LABEL" != "true" ]]; then
+            echo "$TICKET_KEY does not have the 'hotfix' label."
+            exit 1
+          fi
+
+          echo "$TICKET_KEY is P1 and labelled 'hotfix' - hotfix check passed."
+
+  hotfix-merge-approval:
+    name: hotfix-merge-approval
+    needs: [check-branch-name, check-jira-priority]
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'master' && github.head_ref != 'staging'
+    environment: hotfix-merge-approval
+    steps:
+      - name: Record approval
+        run: echo "Hotfix merge approved by an authorized reviewer via the hotfix-merge-approval environment."
