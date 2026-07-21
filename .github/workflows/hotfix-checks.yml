@@ -1,6 +1,6 @@
 # Rule: hotfix-checks
 #
-# Purpose: gates every PR into master on three checks:
+# Purpose: gates every PR into master on two checks:
 #
 #   1. check-branch-name    - the source branch must start with hotfix/
 #                              (case-insensitive: hotfix/, Hotfix/, HOTFIX/
@@ -13,36 +13,33 @@
 #                                 that's the real field name/spelling in
 #                                this Jira instance) = "P1"
 #                                - the issue's labels include "hotfix"
-#                                 (case-insensitive)
-#   3. hotfix-merge-approval - requires an APPROVED review on the PR from
-#                              someone listed in the HOTFIX_APPROVERS repo
-#                              variable (comma-separated GitHub usernames).
+#                                  (case-insensitive)
 #
-# All three live in this ONE file, but on TWO different triggers, and each
-# job is restricted (via `if: github.event_name == ...`) to exactly one of
-# them:
-#   - check-branch-name / check-jira-priority only run on `pull_request`
-#     (their result - branch name, Jira ticket state - doesn't change after
-#     the PR is opened, so they don't need to react to reviews).
-#   - hotfix-merge-approval only runs on `pull_request_review` (submitted).
+# The third rule - hotfix-merge-approval (requiring an APPROVED review from
+# someone in the HOTFIX_APPROVERS repo variable) - lives in its OWN file,
+# hotfix-merge-approval.yml, triggered ONLY by pull_request_review.
 #
-# WHY THE if: SPLIT MATTERS: earlier this repo had all three jobs
-# unconditionally responding to BOTH pull_request and pull_request_review.
-# Since hotfix-merge-approval's result changes over time (no approval yet,
-# then approved), having it run under BOTH triggers created two separate,
-# independently-tracked required-check entries for the same job name - one
-# per triggering event. The pull_request-triggered entry only reflected
-# approval state as of PR-open time and never re-ran on its own after a
-# review was submitted (only the pull_request_review-triggered entry
-# updated), so that first entry stayed failed/stuck forever, permanently
-# blocking merge even after a valid approval, until manually re-run. Gating
-# hotfix-merge-approval to ONLY ever run on pull_request_review means it
-# has exactly one entry, which starts out pending (blocking merge, as
-# intended) and updates cleanly every time a review is submitted - nothing
-# to get stuck. check-branch-name/check-jira-priority are safe to combine
-# into the same file because their result is static for the PR's lifetime,
-# so even though the `if:` below keeps them to a single trigger too, there
-# was never a staleness risk for them specifically.
+# WHY IT'S A SEPARATE FILE, NOT JUST A DIFFERENT on: BLOCK IN THIS ONE:
+# GitHub creates a required-check entry for a job under EVERY top-level
+# trigger declared in its file, regardless of any job-level `if:` condition
+# - the `if:` only decides whether that particular run executes for real or
+# reports "skipped"; it does NOT stop the entry from being created. So if
+# this file declared both `on: pull_request` and `on: pull_request_review`
+# and gated hotfix-merge-approval to only run on the latter, it would still
+# get a permanent, always-"skipped" duplicate entry under `pull_request`
+# (harmless, since skipped counts as passing, but six required-check rows
+# show up in every PR instead of three, which is confusing to look at, and
+# it defeats the ability to see hotfix-merge-approval's context on its own
+# right away).
+#
+# Putting hotfix-merge-approval in a file with ONLY `on: pull_request_review`
+# means it NEVER gets an entry under the pull_request event at all - there's
+# no second trigger for it to be duplicated against - so it shows a clean
+# single "Expected - waiting for status to be reported" until a real review
+# happens, then a real pass/fail. Likewise, keeping check-branch-name and
+# check-jira-priority in a file with ONLY `on: pull_request` means they
+# never get a duplicate `(pull_request_review)` entry either. Net result:
+# exactly 3 required checks show up on a PR, never 6.
 #
 # Required repo config (Settings -> Secrets and variables -> Actions):
 #   - Variable JIRA_USER_EMAIL   - email of the Jira account that owns the
@@ -52,7 +49,7 @@
 #                                   https://id.atlassian.com/manage-profile/security/api-tokens)
 #   - Variable HOTFIX_APPROVERS  - comma-separated GitHub usernames
 #                                   authorized to clear a hotfix PR to merge
-#                                   (e.g. "muhammadanees-ai,arslantabassum").
+#                                   (used by hotfix-merge-approval.yml).
 #
 # NOTE: the standard Jira "Priority" field isn't used here - "Request
 # Prioirty" (customfield_10795) is the field this Jira instance's PROD
@@ -60,7 +57,8 @@
 # that ever changes.
 #
 # `check-branch-name`, `check-jira-priority`, and `hotfix-merge-approval`
-# should be added as required status checks on master (Settings -> Branches).
+# should be added as required status checks on master (Settings -> Branches
+# or Rules, depending on which mechanism you're using).
 #
 name: Hotfix Checks
 
@@ -69,13 +67,10 @@ on:
     branches:
       - master
     types: [opened, synchronize, reopened, ready_for_review, edited]
-  pull_request_review:
-    types: [submitted]
 
 jobs:
   check-branch-name:
     name: check-branch-name
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Validate hotfix branch naming
@@ -92,7 +87,6 @@ jobs:
 
   check-jira-priority:
     name: check-jira-priority
-    if: github.event_name == 'pull_request'
     needs: check-branch-name
     runs-on: ubuntu-latest
     env:
@@ -167,37 +161,3 @@ jobs:
           fi
 
           echo "$TICKET_KEY is P1 and labelled 'hotfix'."
-
-  hotfix-merge-approval:
-    name: hotfix-merge-approval
-    if: github.event_name == 'pull_request_review'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-      contents: read
-    steps:
-      - name: Require approval from an authorized hotfix approver
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APPROVERS: ${{ vars.HOTFIX_APPROVERS }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          if [[ -z "$APPROVERS" ]]; then
-            echo "::error::HOTFIX_APPROVERS repo variable is not set - cannot verify an authorized approver."
-            exit 1
-          fi
-
-          APPROVED_BY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviews \
-            --jq '[.reviews[] | select(.state=="APPROVED")] | .[-1].author.login // empty')
-
-          if [[ -z "$APPROVED_BY" ]]; then
-            echo "::error::No approving review yet from an authorized hotfix approver ($APPROVERS). Ask one of them to review and approve this PR - this check re-runs automatically once they do."
-            exit 1
-          fi
-
-          if [[ ",$APPROVERS," != *",$APPROVED_BY,"* ]]; then
-            echo "::error::$APPROVED_BY approved, but is not in the authorized hotfix-approver list ($APPROVERS)."
-            exit 1
-          fi
-
-          echo "Approved by $APPROVED_BY - an authorized hotfix approver."
