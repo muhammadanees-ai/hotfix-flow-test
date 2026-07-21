@@ -1,0 +1,54 @@
+# Rule: hotfix-merge-approval
+#
+# Requires an APPROVED review on the PR from someone listed in the
+# HOTFIX_APPROVERS repo variable (comma-separated GitHub usernames) before
+# a hotfix PR into master can merge.
+#
+# Deliberately kept in its own file, triggered ONLY by pull_request_review.
+# See the header comment in hotfix-checks.yml for why: putting this job in
+# a file that also responds to pull_request would give it a permanent,
+# always-"skipped" duplicate required-check entry under that event (GitHub
+# creates the entry for every trigger a file declares, regardless of any
+# job-level `if:` condition). Keeping it to one trigger keeps the "Required
+# checks" list on every PR clean and unambiguous: this shows as
+# "Expected - waiting for status to be reported" until a real review
+# happens, then reports a real pass/fail every time a review is submitted.
+name: Hotfix Merge Approval
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  hotfix-merge-approval:
+    name: hotfix-merge-approval
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Require approval from an authorized hotfix approver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVERS: ${{ vars.HOTFIX_APPROVERS }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ -z "$APPROVERS" ]]; then
+            echo "::error::HOTFIX_APPROVERS repo variable is not set - cannot verify an authorized approver."
+            exit 1
+          fi
+
+          APPROVED_BY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviews \
+            --jq '[.reviews[] | select(.state=="APPROVED")] | .[-1].author.login // empty')
+
+          if [[ -z "$APPROVED_BY" ]]; then
+            echo "::error::No approving review yet from an authorized hotfix approver ($APPROVERS). Ask one of them to review and approve this PR - this check re-runs automatically once they do."
+            exit 1
+          fi
+
+          if [[ ",$APPROVERS," != *",$APPROVED_BY,"* ]]; then
+            echo "::error::$APPROVED_BY approved, but is not in the authorized hotfix-approver list ($APPROVERS)."
+            exit 1
+          fi
+
+          echo "Approved by $APPROVED_BY - an authorized hotfix approver."
