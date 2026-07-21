@@ -1,8 +1,19 @@
 # Rule: hotfix-merge-approval
 #
-# Requires an APPROVED review on the PR from someone listed in the
-# HOTFIX_APPROVERS repo variable (comma-separated GitHub usernames) before
-# a hotfix PR into master can merge.
+# Requires an APPROVED review on the PR before it can merge, and enforces
+# WHO counts as authorized in one of two ways:
+#
+#   1. If the PR's AUTHOR is themselves listed in the HOTFIX_APPROVERS repo
+#      variable (comma-separated GitHub usernames), any approving review
+#      is sufficient - the identity of the reviewer isn't checked. This
+#      covers the case where a trusted approver opens the hotfix PR
+#      themselves; GitHub already blocks self-approval, so someone else
+#      still has to click Approve to satisfy the platform's own "1 review
+#      required" rule, but that person doesn't need to be on the list too.
+#   2. Otherwise (the author is NOT on the list), the approving reviewer
+#      themselves must be listed in HOTFIX_APPROVERS - this is the
+#      original behavior: an unauthorized author needs a genuinely
+#      authorized approver to sign off.
 #
 # Deliberately kept in its own file, triggered ONLY by pull_request_review.
 # See the header comment in hotfix-checks.yml for why: putting this job in
@@ -27,11 +38,12 @@ jobs:
       pull-requests: read
       contents: read
     steps:
-      - name: Require approval from an authorized hotfix approver
+      - name: Require approval from an authorized hotfix approver (or an authorized author)
         env:
           GH_TOKEN: ${{ github.token }}
           APPROVERS: ${{ vars.HOTFIX_APPROVERS }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           if [[ -z "$APPROVERS" ]]; then
             echo "::error::HOTFIX_APPROVERS repo variable is not set - cannot verify an authorized approver."
@@ -46,8 +58,13 @@ jobs:
             exit 1
           fi
 
+          if [[ ",$APPROVERS," == *",$PR_AUTHOR,"* ]]; then
+            echo "PR author $PR_AUTHOR is an authorized hotfix approver - approval by $APPROVED_BY is sufficient."
+            exit 0
+          fi
+
           if [[ ",$APPROVERS," != *",$APPROVED_BY,"* ]]; then
-            echo "::error::$APPROVED_BY approved, but is not in the authorized hotfix-approver list ($APPROVERS)."
+            echo "::error::$APPROVED_BY approved, but is not in the authorized hotfix-approver list ($APPROVERS), and PR author $PR_AUTHOR is not on the list either."
             exit 1
           fi
 
